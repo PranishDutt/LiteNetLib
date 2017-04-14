@@ -46,9 +46,9 @@ namespace LibSample
                 peer.Send(testData, SendOptions.ReliableOrdered);
             }
 
-            public void OnPeerDisconnected(NetPeer peer, DisconnectReason disconnectReason, int socketErrorCode)
+            public void OnPeerDisconnected(NetPeer peer, DisconnectInfo disconnectInfo)
             {
-                Console.WriteLine("[Client] disconnected: " + disconnectReason);
+                Console.WriteLine("[Client] disconnected: " + disconnectInfo.Reason);
             }
 
             public void OnNetworkError(NetEndPoint endPoint, int socketErrorCode)
@@ -60,14 +60,14 @@ namespace LibSample
             {
                 if (reader.AvailableBytes == 13218)
                 {
-                    Console.WriteLine("[{0}] TestFrag: {1}, {2}", peer.Handler.LocalEndPoint.Port, reader.Data[0], reader.Data[13217]);
+                    Console.WriteLine("[{0}] TestFrag: {1}, {2}", peer.NetManager.LocalEndPoint.Port, reader.Data[0], reader.Data[13217]);
                 }
                 else
                 {
                     int type = reader.GetInt();
                     int num = reader.GetInt();
                     _messagesReceivedCount++;
-                    Console.WriteLine("[{0}] CNT: {1}, TYPE: {2}, NUM: {3}", peer.Handler.LocalEndPoint.Port, _messagesReceivedCount, type, num);
+                    Console.WriteLine("[{0}] CNT: {1}, TYPE: {2}, NUM: {3}", peer.NetManager.LocalEndPoint.Port, _messagesReceivedCount, type, num);
                 }
             }
 
@@ -84,7 +84,7 @@ namespace LibSample
 
         private class ServerListener : INetEventListener
         {
-            public NetServer Server;
+            public NetManager Server;
 
             public void OnPeerConnected(NetPeer peer)
             {
@@ -92,13 +92,13 @@ namespace LibSample
                 var peers = Server.GetPeers();
                 foreach (var netPeer in peers)
                 {
-                    Console.WriteLine("ConnectedPeersList: id={0}, ep={1}", netPeer.Id, netPeer.EndPoint);
+                    Console.WriteLine("ConnectedPeersList: id={0}, ep={1}", netPeer.ConnectId, netPeer.EndPoint);
                 }
             }
 
-            public void OnPeerDisconnected(NetPeer peer, DisconnectReason disconnectReason, int socketErrorCode)
+            public void OnPeerDisconnected(NetPeer peer, DisconnectInfo disconnectInfo)
             {
-                Console.WriteLine("[Server] Peer disconnected: " + peer.EndPoint + ", reason: " + disconnectReason);
+                Console.WriteLine("[Server] Peer disconnected: " + peer.EndPoint + ", reason: " + disconnectInfo.Reason);
             }
 
             public void OnNetworkError(NetEndPoint endPoint, int socketErrorCode)
@@ -137,7 +137,8 @@ namespace LibSample
             //Server
             _serverListener = new ServerListener();
 
-            NetServer server = new NetServer(_serverListener, 2, "myapp1");
+            NetManager server = new NetManager(_serverListener, 2, "myapp1");
+            //server.ReuseAddress = true;
             if (!server.Start(9050))
             {
                 Console.WriteLine("Server start failed");
@@ -149,7 +150,7 @@ namespace LibSample
             //Client
             _clientListener = new ClientListener();
 
-            NetClient client1 = new NetClient(_clientListener, "myapp1");
+            NetManager client1 = new NetManager(_clientListener, "myapp1");
             //client1.SimulateLatency = true;
             client1.SimulationMaxLatency = 1500;
             client1.MergeEnabled = true;
@@ -160,7 +161,7 @@ namespace LibSample
             }
             client1.Connect("127.0.0.1", 9050);
 
-            NetClient client2 = new NetClient(_clientListener, "myapp1");
+            NetManager client2 = new NetManager(_clientListener, "myapp1");
             //client2.SimulateLatency = true;
             client2.SimulationMaxLatency = 1500;
             client2.Start();

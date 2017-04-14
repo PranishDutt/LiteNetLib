@@ -23,15 +23,14 @@ namespace LiteNetLib
 
         public bool SendNextPacket()
         {
-            if (_outgoingPackets.Count == 0)
-                return false;
-
             NetPacket packet;
             lock (_outgoingPackets)
             {
+                if (_outgoingPackets.Count == 0)
+                    return false;
                 packet = _outgoingPackets.Dequeue();
             }
-            _peer.SendRawData(packet.RawData);
+            _peer.SendRawData(packet);
             _peer.Recycle(packet);
             return true;
         }

@@ -4,6 +4,7 @@ using LiteNetLib;
 
 class Program
 {
+
     static void Main(string[] args)
     {
         //Test ntp
@@ -14,12 +15,11 @@ class Program
             Console.WriteLine("Synced time test: " + ntpSync.SyncedTime.Value);
         }
 
-        //HolePunchServerTest holePunchServerTest = new HolePunchServerTest();
-        EchoMessagesTest echoMessagesTest = new EchoMessagesTest();
-        //BroadcastTest broadcastTest = new BroadcastTest();
+        //new EchoMessagesTest().Run();
+        //new HolePunchServerTest().Run();
+        //new BroadcastTest().Run();
 
-        //holePunchServerTest.Run();
-        echoMessagesTest.Run();
-        //broadcastTest.Run();
+        //new BenchmarkTest.TestHost().Run();
+        new SerializerTest().Run();
     }
 }

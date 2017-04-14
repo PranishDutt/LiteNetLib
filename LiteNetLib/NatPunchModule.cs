@@ -48,7 +48,7 @@ namespace LiteNetLib
             public string Token;
         }
 
-        private readonly NetBase _netBase;
+        private readonly NetManager _netBase;
         private readonly Queue<RequestEventData> _requestEvents;
         private readonly Queue<SuccessEventData> _successEvents; 
         private const byte HostByte = 1;
@@ -57,7 +57,7 @@ namespace LiteNetLib
 
         private INatPunchListener _natPunchListener;
 
-        internal NatPunchModule(NetBase netBase, NetSocket socket)
+        internal NatPunchModule(NetManager netBase)
         {
             _netBase = netBase;
             _requestEvents = new Queue<RequestEventData>();
@@ -85,7 +85,8 @@ namespace LiteNetLib
             dw.Put(hostExternal);
             dw.Put(additionalInfo, MaxTokenLength);
 
-            _netBase.SendRaw(NetPacket.CreateRawPacket(PacketProperty.NatIntroduction, dw), clientExternal);
+            var packet = _netBase.PacketPool.GetWithData(PacketProperty.NatIntroduction, dw);
+            _netBase.SendRawAndRecycle(packet, clientExternal);
 
             //Second packet (client)
             //send to server
@@ -95,7 +96,8 @@ namespace LiteNetLib
             dw.Put(clientExternal);
             dw.Put(additionalInfo, MaxTokenLength);
 
-            _netBase.SendRaw(NetPacket.CreateRawPacket(PacketProperty.NatIntroduction, dw), hostExternal);
+            packet = _netBase.PacketPool.GetWithData(PacketProperty.NatIntroduction, dw);
+            _netBase.SendRawAndRecycle(packet, hostExternal);
         }
 
         public void PollEvents()
@@ -127,14 +129,19 @@ namespace LiteNetLib
 
             //prepare outgoing data
             NetDataWriter dw = new NetDataWriter();
-            string networkIp = NetUtils.GetLocalIp(true);
+            string networkIp = NetUtils.GetLocalIp(LocalAddrType.IPv4);
+            if (string.IsNullOrEmpty(networkIp))
+            {
+                networkIp = NetUtils.GetLocalIp(LocalAddrType.IPv6);
+            }
             int networkPort = _netBase.LocalEndPoint.Port;
             NetEndPoint localEndPoint = new NetEndPoint(networkIp, networkPort);
             dw.Put(localEndPoint);
             dw.Put(additionalInfo, MaxTokenLength);
 
             //prepare packet
-            _netBase.SendRaw(NetPacket.CreateRawPacket(PacketProperty.NatIntroductionRequest, dw), masterServerEndPoint);
+            var packet = _netBase.PacketPool.GetWithData(PacketProperty.NatIntroductionRequest, dw);
+            _netBase.SendRawAndRecycle(packet, masterServerEndPoint);
         }
 
         private void HandleNatPunch(NetEndPoint senderEndPoint, NetDataReader dr)
@@ -171,14 +178,16 @@ namespace LiteNetLib
             // send internal punch
             writer.Put(hostByte);
             writer.Put(token);
-            _netBase.SendRaw(NetPacket.CreateRawPacket(PacketProperty.NatPunchMessage, writer), remoteInternal);
+            var packet = _netBase.PacketPool.GetWithData(PacketProperty.NatPunchMessage, writer);
+            _netBase.SendRawAndRecycle(packet, remoteInternal);
             NetUtils.DebugWrite(ConsoleColor.Cyan, "[NAT] internal punch sent to " + remoteInternal);
 
             // send external punch
             writer.Reset();
             writer.Put(hostByte);
             writer.Put(token);
-            _netBase.SendRaw(NetPacket.CreateRawPacket(PacketProperty.NatPunchMessage, writer), remoteExternal);
+            packet = _netBase.PacketPool.GetWithData(PacketProperty.NatPunchMessage, writer);
+            _netBase.SendRawAndRecycle(packet, remoteExternal);
             NetUtils.DebugWrite(ConsoleColor.Cyan, "[NAT] external punch sent to " + remoteExternal);
         }
 
@@ -197,11 +206,10 @@ namespace LiteNetLib
             }
         }
 
-        internal void ProcessMessage(NetEndPoint senderEndPoint, PacketProperty property, byte[] data)
+        internal void ProcessMessage(NetEndPoint senderEndPoint, NetPacket packet)
         {
-            NetDataReader dr = new NetDataReader(data);
-
-            switch (property)
+            var dr = new NetDataReader(packet.RawData, NetConstants.HeaderSize, packet.Size);
+            switch (packet.Property)
             {
                 case PacketProperty.NatIntroductionRequest:
                     //We got request and must introduce

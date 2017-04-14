@@ -14,10 +14,10 @@ namespace LiteNetLib
         private Thread _threadv4;
         private Thread _threadv6;
         private bool _running;
-        private readonly NetBase.OnMessageReceived _onMessageReceived;
+        private readonly NetManager.OnMessageReceived _onMessageReceived;
 
-        private static readonly IPAddress MulticastAddressV6 = IPAddress.Parse(NetConstants.MulticastGroupIPv6);
-        private static readonly bool IPv6Support = Socket.OSSupportsIPv6;
+        private static readonly IPAddress MulticastAddressV6 = IPAddress.Parse (NetConstants.MulticastGroupIPv6);
+        private static readonly bool IPv6Support;
         private const int SocketReceivePollTime = 100000;
         private const int SocketSendPollTime = 5000;
 
@@ -26,7 +26,20 @@ namespace LiteNetLib
             get { return _localEndPoint; }
         }
 
-        public NetSocket(NetBase.OnMessageReceived onMessageReceived)
+        static NetSocket()
+        {
+            try
+            {
+                //Unity3d .NET 2.0 throws exception.
+                IPv6Support = Socket.OSSupportsIPv6;
+            }
+            catch 
+            {
+                IPv6Support = false;
+            }
+        }
+
+        public NetSocket(NetManager.OnMessageReceived onMessageReceived)
         {
             _onMessageReceived = onMessageReceived;
         }
@@ -65,10 +78,10 @@ namespace LiteNetLib
                         //10040 - message too long
                         //10054 - remote close (not error)
                         //Just UDP
-                        NetUtils.DebugWrite(ConsoleColor.DarkRed, "[R] Ingored error: {0} - {1}", ex.ErrorCode, ex.ToString() );
+                        NetUtils.DebugWrite(ConsoleColor.DarkRed, "[R] Ingored error: {0} - {1}", (int)ex.SocketErrorCode, ex.ToString() );
                         continue;
                     }
-                    NetUtils.DebugWriteError("[R]Error code: {0} - {1}", ex.ErrorCode, ex.ToString());
+                    NetUtils.DebugWriteError("[R]Error code: {0} - {1}", (int)ex.SocketErrorCode, ex.ToString());
                     _onMessageReceived(null, 0, (int)ex.SocketErrorCode, bufferNetEndPoint);
                     continue;
                 }
@@ -79,14 +92,18 @@ namespace LiteNetLib
             }
         }
 
-        public bool Bind(int port)
+        public bool Bind(int port, bool reuseAddress)
         {
             _udpSocketv4 = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             _udpSocketv4.Blocking = false;
             _udpSocketv4.ReceiveBufferSize = NetConstants.SocketBufferSize;
             _udpSocketv4.SendBufferSize = NetConstants.SocketBufferSize;
             _udpSocketv4.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.IpTimeToLive, NetConstants.SocketTTL);
-            _udpSocketv4.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.DontFragment, true);
+            if(reuseAddress)
+                _udpSocketv4.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+#if !NETCORE
+            _udpSocketv4.DontFragment = true;
+#endif
 
             try
             {
@@ -120,6 +137,8 @@ namespace LiteNetLib
             _udpSocketv6.Blocking = false;
             _udpSocketv6.ReceiveBufferSize = NetConstants.SocketBufferSize;
             _udpSocketv6.SendBufferSize = NetConstants.SocketBufferSize;
+            if (reuseAddress)
+                _udpSocketv6.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
 
             if (BindSocket(_udpSocketv6, new IPEndPoint(IPAddress.IPv6Any, port)))
             {
@@ -132,7 +151,7 @@ namespace LiteNetLib
                         SocketOptionName.AddMembership,
                         new IPv6MulticastOption(MulticastAddressV6));
                 }
-                catch
+                catch(Exception)
                 {
                     // Unity3d throws exception - ignored
                 }
@@ -216,7 +235,7 @@ namespace LiteNetLib
                     NetUtils.DebugWriteError("[S]" + ex);
                 }
                 
-                errorCode = ex.ErrorCode;
+                errorCode = (int)ex.SocketErrorCode;
                 return -1;
             }
             catch (Exception ex)
@@ -224,6 +243,15 @@ namespace LiteNetLib
                 NetUtils.DebugWriteError("[S]" + ex);
                 return -1;
             }
+        }
+
+        private void CloseSocket(Socket s)
+        {
+#if NETCORE
+            s.Dispose();
+#else
+            s.Close();
+#endif
         }
 
         public void Close()
@@ -238,7 +266,7 @@ namespace LiteNetLib
             _threadv4 = null;
             if (_udpSocketv4 != null)
             {
-                _udpSocketv4.Close();
+                CloseSocket(_udpSocketv4);
                 _udpSocketv4 = null;
             }
 
@@ -254,7 +282,7 @@ namespace LiteNetLib
             _threadv6 = null;
             if (_udpSocketv6 != null)
             {
-                _udpSocketv6.Close();
+                CloseSocket(_udpSocketv6);
                 _udpSocketv6 = null;
             }
         }
@@ -265,6 +293,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices.WindowsRuntime;
+using System.Threading;
 using System.Threading.Tasks;
 using Windows.Networking;
 using Windows.Networking.Sockets;
@@ -276,7 +305,7 @@ namespace LiteNetLib
     {
         private DatagramSocket _datagramSocket;
         private readonly Dictionary<NetEndPoint, IOutputStream> _peers = new Dictionary<NetEndPoint, IOutputStream>();
-        private readonly NetBase.OnMessageReceived _onMessageReceived;
+        private readonly NetManager.OnMessageReceived _onMessageReceived;
         private readonly byte[] _byteBuffer = new byte[NetConstants.PacketSizeLimit];
         private readonly IBuffer _buffer;
         private NetEndPoint _bufferEndPoint;
@@ -289,7 +318,7 @@ namespace LiteNetLib
             get { return _localEndPoint; }
         }
 
-        public NetSocket(NetBase.OnMessageReceived onMessageReceived)
+        public NetSocket(NetManager.OnMessageReceived onMessageReceived)
         {
             _onMessageReceived = onMessageReceived;
             _buffer = _byteBuffer.AsBuffer();
@@ -311,7 +340,7 @@ namespace LiteNetLib
             _onMessageReceived(_byteBuffer, length, 0, _bufferEndPoint);
         }
 
-        public bool Bind(int port)
+        public bool Bind(int port, bool reuseAddress)
         {
             _datagramSocket = new DatagramSocket();
             _datagramSocket.Control.InboundBufferSizeInBytes = NetConstants.SocketBufferSize;

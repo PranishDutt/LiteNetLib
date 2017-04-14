@@ -24,6 +24,7 @@ namespace LiteNetLib
         public const int SocketTTL = 255;
 
         //protocol
+        public const int ProtocolId = 1;
         public const int MaxUdpHeaderSize = 68;
         public const int PacketSizeLimit = ushort.MaxValue - MaxUdpHeaderSize;
         public const int MinPacketSize = 576 - MaxUdpHeaderSize;
@@ -39,6 +40,8 @@ namespace LiteNetLib
             4464 - MaxUdpHeaderSize, //Token ring
             7981 - MaxUdpHeaderSize  //WLAN
         };
+
+        public static int MaxPacketSize = PossibleMtu[PossibleMtu.Length - 1];
 
         //peer specific
         public const int FlowUpdateTime = 1000;

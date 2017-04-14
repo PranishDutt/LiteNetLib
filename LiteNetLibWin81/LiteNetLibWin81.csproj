@@ -34,6 +34,8 @@
     <DefineConstants>TRACE;WINRT</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
+    <DocumentationFile>bin\Release\LiteNetLibWin81.XML</DocumentationFile>
+    <NoWarn>1591</NoWarn>
   </PropertyGroup>
   <PropertyGroup>
     <StartupObject />
@@ -50,12 +52,6 @@
     <Compile Include="..\LiteNetLib\NatPunchModule.cs">
       <Link>NatPunchModule.cs</Link>
     </Compile>
-    <Compile Include="..\LiteNetLib\NetBase.cs">
-      <Link>NetBase.cs</Link>
-    </Compile>
-    <Compile Include="..\LiteNetLib\NetClient.cs">
-      <Link>NetClient.cs</Link>
-    </Compile>
     <Compile Include="..\LiteNetLib\NetConstants.cs">
       <Link>NetConstants.cs</Link>
     </Compile>
@@ -65,14 +61,20 @@
     <Compile Include="..\LiteNetLib\NetEndPoint.cs">
       <Link>NetEndPoint.cs</Link>
     </Compile>
+    <Compile Include="..\LiteNetLib\NetManager.cs">
+      <Link>NetManager.cs</Link>
+    </Compile>
     <Compile Include="..\LiteNetLib\NetPacket.cs">
       <Link>NetPacket.cs</Link>
+    </Compile>
+    <Compile Include="..\LiteNetLib\NetPacketPool.cs">
+      <Link>NetPacketPool.cs</Link>
     </Compile>
     <Compile Include="..\LiteNetLib\NetPeer.cs">
       <Link>NetPeer.cs</Link>
     </Compile>
-    <Compile Include="..\LiteNetLib\NetServer.cs">
-      <Link>NetServer.cs</Link>
+    <Compile Include="..\LiteNetLib\NetPeerCollection.cs">
+      <Link>NetPeerCollection.cs</Link>
     </Compile>
     <Compile Include="..\LiteNetLib\NetSocket.cs">
       <Link>NetSocket.cs</Link>
@@ -103,6 +105,9 @@
     </Compile>
     <Compile Include="..\LiteNetLib\Utils\NetDataWriter.cs">
       <Link>Utils\NetDataWriter.cs</Link>
+    </Compile>
+    <Compile Include="..\LiteNetLib\Utils\NetSerializer.cs">
+      <Link>Utils\NetSerializer.cs</Link>
     </Compile>
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
