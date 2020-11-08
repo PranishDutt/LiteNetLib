@@ -1,489 +1,685 @@
 ﻿using System;
 using System.Reflection;
 using System.Collections.Generic;
-#if WINRT || NETCORE
-using System.Linq;
-#endif
+using System.Net;
 
 namespace LiteNetLib.Utils
 {
-    public interface INetSerializable
+    public class InvalidTypeException : ArgumentException
     {
-        void Serialize(NetDataWriter writer);
-        void Desereialize(NetDataReader reader);
+        public InvalidTypeException(string message) : base(message) { }
     }
 
-    public abstract class NetSerializerHasher
+    public class ParseException : Exception
     {
-        public abstract ulong GetHash(string type);
-        public abstract void WriteHash(string type, NetDataWriter writer);
-        public abstract ulong ReadHash(NetDataReader reader);
+        public ParseException(string message) : base(message) { }
     }
 
-    public sealed class FNVHasher : NetSerializerHasher
+    public class NetSerializer
     {
-        private readonly Dictionary<string, ulong> _hashCache = new Dictionary<string, ulong>();
-        private readonly char[] _hashBuffer = new char[1024];
-
-        public override ulong GetHash(string type)
+        private enum CallType
         {
-            ulong hash;
-            if (_hashCache.TryGetValue(type, out hash))
+            Basic,
+            Array,
+            List
+        }
+
+        private abstract class FastCall<T>
+        {
+            public CallType Type;
+            public virtual void Init(MethodInfo getMethod, MethodInfo setMethod, CallType type) { Type = type; }
+            public abstract void Read(T inf, NetDataReader r);
+            public abstract void Write(T inf, NetDataWriter w);
+            public abstract void ReadArray(T inf, NetDataReader r);
+            public abstract void WriteArray(T inf, NetDataWriter w);
+            public abstract void ReadList(T inf, NetDataReader r);
+            public abstract void WriteList(T inf, NetDataWriter w);
+        }
+
+        private abstract class FastCallSpecific<TClass, TProperty> : FastCall<TClass>
+        {
+            protected Func<TClass, TProperty> Getter;
+            protected Action<TClass, TProperty> Setter;
+            protected Func<TClass, TProperty[]> GetterArr;
+            protected Action<TClass, TProperty[]> SetterArr;
+            protected Func<TClass, List<TProperty>> GetterList;
+            protected Action<TClass, List<TProperty>> SetterList;
+
+            public override void ReadArray(TClass inf, NetDataReader r) { throw new InvalidTypeException("Unsupported type: " + typeof(TProperty) + "[]"); }
+            public override void WriteArray(TClass inf, NetDataWriter w) { throw new InvalidTypeException("Unsupported type: " + typeof(TProperty) + "[]"); }
+            public override void ReadList(TClass inf, NetDataReader r) { throw new InvalidTypeException("Unsupported type: List<" + typeof(TProperty) + ">"); }
+            public override void WriteList(TClass inf, NetDataWriter w) { throw new InvalidTypeException("Unsupported type: List<" + typeof(TProperty) + ">"); }
+
+            protected TProperty[] ReadArrayHelper(TClass inf, NetDataReader r)
             {
-                return hash;
+                ushort count = r.GetUShort();
+                var arr = GetterArr(inf);
+                arr = arr == null || arr.Length != count ? new TProperty[count] : arr;
+                SetterArr(inf, arr);
+                return arr;
             }
-            hash = 14695981039346656037UL; //offset
-            int len = type.Length;
-            type.CopyTo(0, _hashBuffer, 0, len);
-            for (var i = 0; i < len; i++)
+
+            protected TProperty[] WriteArrayHelper(TClass inf, NetDataWriter w)
             {
-                hash = hash ^ _hashBuffer[i];
-                hash *= 1099511628211UL; //prime
+                var arr = GetterArr(inf);
+                w.Put((ushort)arr.Length);
+                return arr;
             }
-            _hashCache.Add(type, hash);
-            return hash;
-        }
 
-        public override ulong ReadHash(NetDataReader reader)
-        {
-            return reader.GetULong();
-        }
-
-        public override void WriteHash(string type, NetDataWriter writer)
-        {
-            writer.Put(GetHash(type));
-        }
-    }
-
-    public sealed class NetSerializer
-    {
-        private sealed class CustomType
-        {
-            public readonly CustomTypeWrite WriteDelegate;
-            public readonly CustomTypeRead ReadDelegate;
-
-            public CustomType(CustomTypeWrite writeDelegate, CustomTypeRead readDelegate)
+            protected List<TProperty> ReadListHelper(TClass inf, NetDataReader r, out int len)
             {
-                WriteDelegate = writeDelegate;
-                ReadDelegate = readDelegate;
+                len = r.GetUShort();
+                var list = GetterList(inf);
+                if (list == null)
+                {
+                    list = new List<TProperty>(len);
+                    SetterList(inf, list);
+                }
+                return list;
             }
-        }
 
-        private delegate void CustomTypeWrite(NetDataWriter writer, object customObj);
-        private delegate object CustomTypeRead(NetDataReader reader);
-
-        private sealed class StructInfo
-        {
-            public readonly Action<NetDataWriter>[] WriteDelegate;
-            public readonly Action<NetDataReader>[] ReadDelegate;
-            public readonly Type[] FieldTypes;
-            public object Reference;
-            public Func<object> CreatorFunc;
-            public Action<object, object> OnReceive;
-
-            public StructInfo(int membersCount)
+            protected List<TProperty> WriteListHelper(TClass inf, NetDataWriter w, out int len)
             {
-                WriteDelegate = new Action<NetDataWriter>[membersCount];
-                ReadDelegate = new Action<NetDataReader>[membersCount];
-                FieldTypes = new Type[membersCount];
+                var list = GetterList(inf);
+                if (list == null)
+                {
+                    len = 0;
+                    w.Put(0);
+                    return null;
+                }
+                len = list.Count;
+                w.Put((ushort)len);
+                return list;
+            }
+
+            public override void Init(MethodInfo getMethod, MethodInfo setMethod, CallType type)
+            {
+                base.Init(getMethod, setMethod, type);
+                switch (type)
+                {
+                    case CallType.Array:
+                        GetterArr = (Func<TClass, TProperty[]>)Delegate.CreateDelegate(typeof(Func<TClass, TProperty[]>), getMethod);
+                        SetterArr = (Action<TClass, TProperty[]>)Delegate.CreateDelegate(typeof(Action<TClass, TProperty[]>), setMethod);
+                        break;
+                    case CallType.List:
+                        GetterList = (Func<TClass, List<TProperty>>)Delegate.CreateDelegate(typeof(Func<TClass, List<TProperty>>), getMethod);
+                        SetterList = (Action<TClass, List<TProperty>>)Delegate.CreateDelegate(typeof(Action<TClass, List<TProperty>>), setMethod);
+                        break;
+                    default:
+                        Getter = (Func<TClass, TProperty>)Delegate.CreateDelegate(typeof(Func<TClass, TProperty>), getMethod);
+                        Setter = (Action<TClass, TProperty>)Delegate.CreateDelegate(typeof(Action<TClass, TProperty>), setMethod);
+                        break;
+                }
             }
         }
 
-        private readonly Dictionary<ulong, StructInfo> _cache;
-        private readonly Dictionary<Type, CustomType> _registeredCustomTypes;
-        private readonly HashSet<Type> _basicTypes;
-        private readonly NetDataWriter _writer;
-        private readonly NetSerializerHasher _hasher;
-        private const int MaxStringLenght = 1024;
-
-        public NetSerializer() : this(new FNVHasher())
+        private abstract class FastCallSpecificAuto<TClass, TProperty> : FastCallSpecific<TClass, TProperty>
         {
-        }
+            protected abstract void ElementRead(NetDataReader r, out TProperty prop);
+            protected abstract void ElementWrite(NetDataWriter w, ref TProperty prop);
 
-        public NetSerializer(NetSerializerHasher hasher)
-        {
-            _hasher = hasher;
-            _cache = new Dictionary<ulong, StructInfo>();
-            _registeredCustomTypes = new Dictionary<Type, CustomType>();
-            _writer = new NetDataWriter();
-            _basicTypes = new HashSet<Type>
+            public override void Read(TClass inf, NetDataReader r)
             {
-                typeof(int),
-                typeof(uint),
-                typeof(byte),
-                typeof(sbyte),
-                typeof(short),
-                typeof(ushort),
-                typeof(long),
-                typeof(ulong),
-                typeof(string),
-                typeof(float),
-                typeof(double),
-                typeof(bool)
-            };
+                TProperty elem;
+                ElementRead(r, out elem);
+                Setter(inf, elem);
+            }
+
+            public override void Write(TClass inf, NetDataWriter w)
+            {
+                var elem = Getter(inf);
+                ElementWrite(w, ref elem);
+            }
+
+            public override void ReadArray(TClass inf, NetDataReader r)
+            {
+                var arr = ReadArrayHelper(inf, r);
+                for (int i = 0; i < arr.Length; i++)
+                    ElementRead(r, out arr[i]);
+            }
+
+            public override void WriteArray(TClass inf, NetDataWriter w)
+            {
+                var arr = WriteArrayHelper(inf, w);
+                for (int i = 0; i < arr.Length; i++)
+                    ElementWrite(w, ref arr[i]);
+            }
         }
 
-        private static Func<TClass, TProperty> ExtractGetDelegate<TClass, TProperty>(MethodInfo info)
+        private sealed class FastCallStatic<TClass, TProperty> : FastCallSpecific<TClass, TProperty>
         {
-#if WINRT || NETCORE
-            return (Func<TClass, TProperty>)info.CreateDelegate(typeof(Func<TClass, TProperty>));
-#else
-            return (Func<TClass, TProperty>)Delegate.CreateDelegate(typeof(Func<TClass, TProperty>), info);
-#endif
+            private readonly Action<NetDataWriter, TProperty> _writer;
+            private readonly Func<NetDataReader, TProperty> _reader;
+
+            public FastCallStatic(Action<NetDataWriter, TProperty> write, Func<NetDataReader, TProperty> read)
+            {
+                _writer = write;
+                _reader = read;
+            }
+
+            public override void Read(TClass inf, NetDataReader r) { Setter(inf, _reader(r)); }
+            public override void Write(TClass inf, NetDataWriter w) { _writer(w, Getter(inf)); }
+
+            public override void ReadList(TClass inf, NetDataReader r)
+            {
+                int len;
+                var list = ReadListHelper(inf, r, out len);
+                int listCount = list.Count;
+                if (len > listCount)
+                {
+                    for (int i = 0; i < listCount; i++)
+                        list[i] = _reader(r);
+                    for (int i = listCount; i < len; i++)
+                        list.Add(_reader(r));
+                    return;
+                }
+                if (len < listCount)
+                    list.RemoveRange(len, listCount - len);
+                for (int i = 0; i < len; i++)
+                    list[i] = _reader(r);
+            }
+
+            public override void WriteList(TClass inf, NetDataWriter w)
+            {
+                int len;
+                var list = WriteListHelper(inf, w, out len);
+                for (int i = 0; i < len; i++)
+                    _writer(w, list[i]);
+            }
+
+            public override void ReadArray(TClass inf, NetDataReader r)
+            {
+                var arr = ReadArrayHelper(inf, r);
+                int len = arr.Length;
+                for (int i = 0; i < len; i++)
+                    arr[i] = _reader(r);
+            }
+
+            public override void WriteArray(TClass inf, NetDataWriter w)
+            {
+                var arr = WriteArrayHelper(inf, w);
+                int len = arr.Length;
+                for (int i = 0; i < len; i++)
+                    _writer(w, arr[i]);
+            }
         }
 
-        private static Action<TClass, TProperty> ExtractSetDelegate<TClass, TProperty>(MethodInfo info)
+        private sealed class FastCallStruct<TClass, TProperty> : FastCallSpecific<TClass, TProperty> where TProperty : struct, INetSerializable
         {
-#if WINRT || NETCORE
-            return (Action<TClass, TProperty>)info.CreateDelegate(typeof(Action<TClass, TProperty>));
-#else
-            return (Action<TClass, TProperty>)Delegate.CreateDelegate(typeof(Action<TClass, TProperty>), info);
-#endif
+            private TProperty _p;
+
+            public override void Read(TClass inf, NetDataReader r)
+            {
+                _p.Deserialize(r);
+                Setter(inf, _p);
+            }
+
+            public override void Write(TClass inf, NetDataWriter w)
+            {
+                _p = Getter(inf);
+                _p.Serialize(w);
+            }
+
+            public override void ReadList(TClass inf, NetDataReader r)
+            {
+                int len;
+                var list = ReadListHelper(inf, r, out len);
+                int listCount = list.Count;
+                if (len > listCount)
+                {
+                    for (int i = 0; i < listCount; i++)
+                        list[i].Deserialize(r);
+                    for (int i = listCount; i < len; i++)
+                    {
+                        var itm = default(TProperty);
+                        itm.Deserialize(r);
+                        list.Add(itm);
+                    }
+                    return;
+                }
+                if(len < listCount)
+                    list.RemoveRange(len, listCount - len);
+                for (int i = 0; i < len; i++)
+                    list[i].Deserialize(r);
+            }
+
+            public override void WriteList(TClass inf, NetDataWriter w)
+            {
+                int len;
+                var list = WriteListHelper(inf, w, out len);
+                for (int i = 0; i < len; i++)
+                    list[i].Serialize(w);
+            }
+
+            public override void ReadArray(TClass inf, NetDataReader r)
+            {
+                var arr = ReadArrayHelper(inf, r);
+                int len = arr.Length;
+                for (int i = 0; i < len; i++)
+                    arr[i].Deserialize(r);
+            }
+
+            public override void WriteArray(TClass inf, NetDataWriter w)
+            {
+                var arr = WriteArrayHelper(inf, w);
+                int len = arr.Length;
+                for (int i = 0; i < len; i++)
+                    arr[i].Serialize(w);
+            }
+        }
+
+        private sealed class FastCallClass<TClass, TProperty> : FastCallSpecific<TClass, TProperty> where TProperty : class, INetSerializable
+        {
+            private readonly Func<TProperty> _constructor;
+            public FastCallClass(Func<TProperty> constructor) { _constructor = constructor; }
+
+            public override void Read(TClass inf, NetDataReader r)
+            {
+                var p = _constructor();
+                p.Deserialize(r);
+                Setter(inf, p);
+            }
+
+            public override void Write(TClass inf, NetDataWriter w)
+            {
+                var p = Getter(inf);
+                if(p != null)
+                    p.Serialize(w);
+            }
+
+            public override void ReadList(TClass inf, NetDataReader r)
+            {
+                int len;
+                var list = ReadListHelper(inf, r, out len);
+                int listCount = list.Count;
+                if (len > listCount)
+                {
+                    for (int i = 0; i < listCount; i++)
+                        list[i].Deserialize(r);
+                    for (int i = listCount; i < len; i++)
+                    {
+                        var itm = _constructor();
+                        itm.Deserialize(r);
+                        list.Add(itm);
+                    }
+                    return;
+                }
+                if (len < listCount)
+                    list.RemoveRange(len, listCount - len);
+                for (int i = 0; i < len; i++)
+                    list[i].Deserialize(r);
+            }
+
+            public override void WriteList(TClass inf, NetDataWriter w)
+            {
+                int len;
+                var list = WriteListHelper(inf, w, out len);
+                for (int i = 0; i < len; i++)
+                    list[i].Serialize(w);
+            }
+
+            public override void ReadArray(TClass inf, NetDataReader r)
+            {
+                var arr = ReadArrayHelper(inf, r);
+                int len = arr.Length;
+                for (int i = 0; i < len; i++)
+                {
+                    arr[i] = _constructor();
+                    arr[i].Deserialize(r);
+                }
+            }
+
+            public override void WriteArray(TClass inf, NetDataWriter w)
+            {
+                var arr = WriteArrayHelper(inf, w);
+                int len = arr.Length;
+                for (int i = 0; i < len; i++)
+                    arr[i].Serialize(w);
+            }
+        }
+
+        private class IntSerializer<T> : FastCallSpecific<T, int>
+        {
+            public override void Read(T inf, NetDataReader r) { Setter(inf, r.GetInt()); }
+            public override void Write(T inf, NetDataWriter w) { w.Put(Getter(inf)); }
+            public override void ReadArray(T inf, NetDataReader r) { SetterArr(inf, r.GetIntArray()); }
+            public override void WriteArray(T inf, NetDataWriter w) { w.PutArray(GetterArr(inf)); }
+        }
+
+        private class UIntSerializer<T> : FastCallSpecific<T, uint>
+        {
+            public override void Read(T inf, NetDataReader r) { Setter(inf, r.GetUInt()); }
+            public override void Write(T inf, NetDataWriter w) { w.Put(Getter(inf)); }
+            public override void ReadArray(T inf, NetDataReader r) { SetterArr(inf, r.GetUIntArray()); }
+            public override void WriteArray(T inf, NetDataWriter w) { w.PutArray(GetterArr(inf)); }
+        }
+
+        private class ShortSerializer<T> : FastCallSpecific<T, short>
+        {
+            public override void Read(T inf, NetDataReader r) { Setter(inf, r.GetShort()); }
+            public override void Write(T inf, NetDataWriter w) { w.Put(Getter(inf)); }
+            public override void ReadArray(T inf, NetDataReader r) { SetterArr(inf, r.GetShortArray()); }
+            public override void WriteArray(T inf, NetDataWriter w) { w.PutArray(GetterArr(inf)); }
+        }
+
+        private class UShortSerializer<T> : FastCallSpecific<T, ushort>
+        {
+            public override void Read(T inf, NetDataReader r) { Setter(inf, r.GetUShort()); }
+            public override void Write(T inf, NetDataWriter w) { w.Put(Getter(inf)); }
+            public override void ReadArray(T inf, NetDataReader r) { SetterArr(inf, r.GetUShortArray()); }
+            public override void WriteArray(T inf, NetDataWriter w) { w.PutArray(GetterArr(inf)); }
+        }
+
+        private class LongSerializer<T> : FastCallSpecific<T, long>
+        {
+            public override void Read(T inf, NetDataReader r) { Setter(inf, r.GetLong()); }
+            public override void Write(T inf, NetDataWriter w) { w.Put(Getter(inf)); }
+            public override void ReadArray(T inf, NetDataReader r) { SetterArr(inf, r.GetLongArray()); }
+            public override void WriteArray(T inf, NetDataWriter w) { w.PutArray(GetterArr(inf)); }
+        }
+
+        private class ULongSerializer<T> : FastCallSpecific<T, ulong>
+        {
+            public override void Read(T inf, NetDataReader r) { Setter(inf, r.GetULong()); }
+            public override void Write(T inf, NetDataWriter w) { w.Put(Getter(inf)); }
+            public override void ReadArray(T inf, NetDataReader r) { SetterArr(inf, r.GetULongArray()); }
+            public override void WriteArray(T inf, NetDataWriter w) { w.PutArray(GetterArr(inf)); }
+        }
+
+        private class ByteSerializer<T> : FastCallSpecific<T, byte>
+        {
+            public override void Read(T inf, NetDataReader r) { Setter(inf, r.GetByte()); }
+            public override void Write(T inf, NetDataWriter w) { w.Put(Getter(inf)); }
+            public override void ReadArray(T inf, NetDataReader r) { SetterArr(inf, r.GetBytesWithLength()); }
+            public override void WriteArray(T inf, NetDataWriter w) { w.PutBytesWithLength(GetterArr(inf)); }
+        }
+
+        private class SByteSerializer<T> : FastCallSpecific<T, sbyte>
+        {
+            public override void Read(T inf, NetDataReader r) { Setter(inf, r.GetSByte()); }
+            public override void Write(T inf, NetDataWriter w) { w.Put(Getter(inf)); }
+            public override void ReadArray(T inf, NetDataReader r) { SetterArr(inf, r.GetSBytesWithLength()); }
+            public override void WriteArray(T inf, NetDataWriter w) { w.PutSBytesWithLength(GetterArr(inf)); }
+        }
+
+        private class FloatSerializer<T> : FastCallSpecific<T, float>
+        {
+            public override void Read(T inf, NetDataReader r) { Setter(inf, r.GetFloat()); }
+            public override void Write(T inf, NetDataWriter w) { w.Put(Getter(inf)); }
+            public override void ReadArray(T inf, NetDataReader r) { SetterArr(inf, r.GetFloatArray()); }
+            public override void WriteArray(T inf, NetDataWriter w) { w.PutArray(GetterArr(inf)); }
+        }
+
+        private class DoubleSerializer<T> : FastCallSpecific<T, double>
+        {
+            public override void Read(T inf, NetDataReader r) { Setter(inf, r.GetDouble()); }
+            public override void Write(T inf, NetDataWriter w) { w.Put(Getter(inf)); }
+            public override void ReadArray(T inf, NetDataReader r) { SetterArr(inf, r.GetDoubleArray()); }
+            public override void WriteArray(T inf, NetDataWriter w) { w.PutArray(GetterArr(inf)); }
+        }
+
+        private class BoolSerializer<T> : FastCallSpecific<T, bool>
+        {
+            public override void Read(T inf, NetDataReader r) { Setter(inf, r.GetBool()); }
+            public override void Write(T inf, NetDataWriter w) { w.Put(Getter(inf)); }
+            public override void ReadArray(T inf, NetDataReader r) { SetterArr(inf, r.GetBoolArray()); }
+            public override void WriteArray(T inf, NetDataWriter w) { w.PutArray(GetterArr(inf)); }
+        }
+
+        private class CharSerializer<T> : FastCallSpecificAuto<T, char>
+        {
+            protected override void ElementWrite(NetDataWriter w, ref char prop) { w.Put(prop); }
+            protected override void ElementRead(NetDataReader r, out char prop) { prop = r.GetChar(); }
+        }
+
+        private class IPEndPointSerializer<T> : FastCallSpecificAuto<T, IPEndPoint>
+        {
+            protected override void ElementWrite(NetDataWriter w, ref IPEndPoint prop) { w.Put(prop); }
+            protected override void ElementRead(NetDataReader r, out IPEndPoint prop) { prop = r.GetNetEndPoint(); }
+        }
+
+        private class StringSerializer<T> : FastCallSpecific<T, string>
+        {
+            private readonly int _maxLength;
+            public StringSerializer(int maxLength) { _maxLength = maxLength > 0 ? maxLength : short.MaxValue; }
+            public override void Read(T inf, NetDataReader r) { Setter(inf, r.GetString(_maxLength)); }
+            public override void Write(T inf, NetDataWriter w) { w.Put(Getter(inf), _maxLength); }
+            public override void ReadArray(T inf, NetDataReader r) { SetterArr(inf, r.GetStringArray(_maxLength)); }
+            public override void WriteArray(T inf, NetDataWriter w) { w.PutArray(GetterArr(inf), _maxLength); }
+        }
+
+        private class EnumByteSerializer<T> : FastCall<T>
+        {
+            protected readonly PropertyInfo Property;
+            protected readonly Type PropertyType;
+            public EnumByteSerializer(PropertyInfo property, Type propertyType)
+            {
+                Property = property;
+                PropertyType = propertyType;
+            }
+            public override void Read(T inf, NetDataReader r) { Property.SetValue(inf, Enum.ToObject(PropertyType, r.GetByte()), null); }
+            public override void Write(T inf, NetDataWriter w) { w.Put((byte)Property.GetValue(inf, null)); }
+            public override void ReadArray(T inf, NetDataReader r) { throw new InvalidTypeException("Unsupported type: Enum[]"); }
+            public override void WriteArray(T inf, NetDataWriter w) { throw new InvalidTypeException("Unsupported type: Enum[]"); }
+            public override void ReadList(T inf, NetDataReader r) { throw new InvalidTypeException("Unsupported type: List<Enum>"); }
+            public override void WriteList(T inf, NetDataWriter w) { throw new InvalidTypeException("Unsupported type: List<Enum>"); }
+        }
+
+        private class EnumIntSerializer<T> : EnumByteSerializer<T>
+        {
+            public EnumIntSerializer(PropertyInfo property, Type propertyType) : base(property, propertyType) { }
+            public override void Read(T inf, NetDataReader r) { Property.SetValue(inf, Enum.ToObject(PropertyType, r.GetInt()), null); }
+            public override void Write(T inf, NetDataWriter w) { w.Put((int)Property.GetValue(inf, null)); }
+        }
+
+        private sealed class ClassInfo<T>
+        {
+            public static ClassInfo<T> Instance;
+            private readonly FastCall<T>[] _serializers;
+            private readonly int _membersCount;
+
+            public ClassInfo(List<FastCall<T>> serializers)
+            {
+                _membersCount = serializers.Count;
+                _serializers = serializers.ToArray();
+            }
+
+            public void Write(T obj, NetDataWriter writer)
+            {
+                for (int i = 0; i < _membersCount; i++)
+                {
+                    var s = _serializers[i];
+                    if (s.Type == CallType.Basic)
+                        s.Write(obj, writer);
+                    else if (s.Type == CallType.Array)
+                        s.WriteArray(obj, writer);
+                    else
+                        s.WriteList(obj, writer);
+                }
+            }
+
+            public void Read(T obj, NetDataReader reader)
+            {
+                for (int i = 0; i < _membersCount; i++)
+                {
+                    var s = _serializers[i];
+                    if (s.Type == CallType.Basic)
+                        s.Read(obj, reader);
+                    else if(s.Type == CallType.Array)
+                        s.ReadArray(obj, reader);
+                    else
+                        s.ReadList(obj, reader);
+                }
+            }
+        }
+
+        private abstract class CustomType
+        {
+            public abstract FastCall<T> Get<T>();
+        }
+
+        private sealed class CustomTypeStruct<TProperty> : CustomType where TProperty : struct, INetSerializable
+        {
+            public override FastCall<T> Get<T>() { return new FastCallStruct<T, TProperty>(); }
+        }
+
+        private sealed class CustomTypeClass<TProperty> : CustomType where TProperty : class, INetSerializable
+        {
+            private readonly Func<TProperty> _constructor;
+            public CustomTypeClass(Func<TProperty> constructor) { _constructor = constructor; }
+            public override FastCall<T> Get<T>() { return new FastCallClass<T, TProperty>(_constructor); }
+        }
+
+        private sealed class CustomTypeStatic<TProperty> : CustomType
+        {
+            private readonly Action<NetDataWriter, TProperty> _writer;
+            private readonly Func<NetDataReader, TProperty> _reader;
+            public CustomTypeStatic(Action<NetDataWriter, TProperty> writer, Func<NetDataReader, TProperty> reader)
+            {
+                _writer = writer;
+                _reader = reader;
+            }
+            public override FastCall<T> Get<T>() { return new FastCallStatic<T, TProperty>(_writer, _reader); }
         }
 
         /// <summary>
         /// Register custom property type
         /// </summary>
         /// <typeparam name="T">INetSerializable structure</typeparam>
-        /// <returns>True - if register successful, false - if type already registered</returns>
-        public bool RegisterCustomType<T>() where T : struct, INetSerializable
+        public void RegisterNestedType<T>() where T : struct, INetSerializable
         {
-            var t = typeof(T);
-            if (_basicTypes.Contains(t) || _registeredCustomTypes.ContainsKey(t))
-            {
-                return false;
-            }
-
-            var rwDelegates = new CustomType(
-                (writer, obj) =>
-                {
-                    ((T)obj).Serialize(writer);
-                },
-                reader =>
-                {
-                    var instance = new T();
-                    instance.Desereialize(reader);
-                    return instance;
-                });
-            _registeredCustomTypes.Add(typeof(T), rwDelegates);
-            return true;
+            _registeredTypes.Add(typeof(T), new CustomTypeStruct<T>());
         }
 
         /// <summary>
         /// Register custom property type
         /// </summary>
-        /// <param name="writeDelegate"></param>
-        /// <param name="readDelegate"></param>
-        /// <returns>True - if register successful, false - if type already registered</returns>
-        public bool RegisterCustomType<T>(Action<NetDataWriter, T> writeDelegate, Func<NetDataReader, T> readDelegate) 
+        /// <typeparam name="T">INetSerializable class</typeparam>
+        public void RegisterNestedType<T>(Func<T> constructor) where T : class, INetSerializable
         {
-            var t = typeof(T);
-            if(_basicTypes.Contains(t) || _registeredCustomTypes.ContainsKey(t))
-            {
-                return false;
-            }
-
-            var rwDelegates = new CustomType(
-                (writer, obj) => writeDelegate(writer, (T) obj),
-                reader => readDelegate(reader));
-
-            _registeredCustomTypes.Add(t, rwDelegates);
-            return true;
+            _registeredTypes.Add(typeof(T), new CustomTypeClass<T>(constructor));
         }
 
-        private StructInfo Register<T>(Type t, ulong nameHash) where T : class 
+        /// <summary>
+        /// Register custom property type
+        /// </summary>
+        /// <typeparam name="T">Any packet</typeparam>
+        /// <param name="writer">custom type writer</param>
+        /// <param name="reader">custom type reader</param>
+        public void RegisterNestedType<T>(Action<NetDataWriter, T> writer, Func<NetDataReader, T> reader)
         {
-            StructInfo info;
-            if (_cache.TryGetValue(nameHash, out info))
-            {
-                return info;
-            }
+            _registeredTypes.Add(typeof(T), new CustomTypeStatic<T>(writer, reader));
+        }
 
-#if WINRT || NETCORE
-            var props = t.GetRuntimeProperties();
-            int propsCount = props.Count();
-#else
+        private NetDataWriter _writer;
+        private readonly int _maxStringLength;
+        private readonly Dictionary<Type, CustomType> _registeredTypes = new Dictionary<Type, CustomType>();
+
+        public NetSerializer() : this(0)
+        {
+        }
+
+        public NetSerializer(int maxStringLength)
+        {
+            _maxStringLength = maxStringLength;
+        }
+
+        private ClassInfo<T> RegisterInternal<T>()
+        {
+            if (ClassInfo<T>.Instance != null)
+                return ClassInfo<T>.Instance;
+
+            Type t = typeof(T);
             var props = t.GetProperties(
-                BindingFlags.Instance | 
-                BindingFlags.Public | 
-                BindingFlags.GetProperty | 
+                BindingFlags.Instance |
+                BindingFlags.Public |
+                BindingFlags.GetProperty |
                 BindingFlags.SetProperty);
-            int propsCount = props.Length;
-#endif
-            if(props == null || propsCount < 0)
+            var serializers = new List<FastCall<T>>();
+            for (int i = 0; i < props.Length; i++)
             {
-                throw new ArgumentException("Type does not contain acceptable fields");
-            }
-
-            info = new StructInfo(propsCount);
-            int i = 0;
-            foreach(var property in props)
-            {
+                var property = props[i];
                 var propertyType = property.PropertyType;
 
-                //Set field type
-                info.FieldTypes[i] = propertyType.IsArray ? propertyType.GetElementType() : propertyType;
-#if WINRT || NETCORE
-                var getMethod = property.GetMethod;
-                var setMethod = property.SetMethod;
-#else
+                var elementType = propertyType.IsArray ? propertyType.GetElementType() : propertyType;
+                var callType = propertyType.IsArray ? CallType.Array : CallType.Basic;
+
+                if (propertyType.IsGenericType && propertyType.GetGenericTypeDefinition() == typeof(List<>))
+                {
+                    elementType = propertyType.GetGenericArguments()[0];
+                    callType = CallType.List;
+                }
+
                 var getMethod = property.GetGetMethod();
                 var setMethod = property.GetSetMethod();
-#endif
-                if (propertyType == typeof(string))
+                if (getMethod == null || setMethod == null)
+                    continue;
+
+                FastCall<T> serialzer = null;
+                if (propertyType.IsEnum)
                 {
-                    var setDelegate = ExtractSetDelegate<T, string>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, string>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetString(MaxStringLenght));
-                    info.WriteDelegate[i] = writer => writer.Put(getDelegate((T)info.Reference), MaxStringLenght);
+                    var underlyingType = Enum.GetUnderlyingType(propertyType);
+                    if (underlyingType == typeof(byte))
+                        serialzer = new EnumByteSerializer<T>(property, propertyType);
+                    else if (underlyingType == typeof(int))
+                        serialzer = new EnumIntSerializer<T>(property, propertyType);
+                    else
+                        throw new InvalidTypeException("Not supported enum underlying type: " + underlyingType.Name);
                 }
-                else if (propertyType == typeof(bool))
+                else if (elementType == typeof(string))
+                    serialzer = new StringSerializer<T>(_maxStringLength);
+                else if (elementType == typeof(bool))
+                    serialzer = new BoolSerializer<T>();
+                else if (elementType == typeof(byte))
+                    serialzer = new ByteSerializer<T>();
+                else if (elementType == typeof(sbyte))
+                    serialzer = new SByteSerializer<T>();
+                else if (elementType == typeof(short))
+                    serialzer = new ShortSerializer<T>();
+                else if (elementType == typeof(ushort))
+                    serialzer = new UShortSerializer<T>();
+                else if (elementType == typeof(int))
+                    serialzer = new IntSerializer<T>();
+                else if (elementType == typeof(uint))
+                    serialzer = new UIntSerializer<T>();
+                else if (elementType == typeof(long))
+                    serialzer = new LongSerializer<T>();
+                else if (elementType == typeof(ulong))
+                    serialzer = new ULongSerializer<T>();
+                else if (elementType == typeof(float))
+                    serialzer = new FloatSerializer<T>();
+                else if (elementType == typeof(double))
+                    serialzer = new DoubleSerializer<T>();
+                else if (elementType == typeof(char))
+                    serialzer = new CharSerializer<T>();
+                else if (elementType == typeof(IPEndPoint))
+                    serialzer = new IPEndPointSerializer<T>();
+                else
                 {
-                    var setDelegate = ExtractSetDelegate<T, bool>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, bool>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetBool());
-                    info.WriteDelegate[i] = writer => writer.Put(getDelegate((T)info.Reference));
+                    CustomType customType;
+                    _registeredTypes.TryGetValue(elementType, out customType);
+                    if (customType != null)
+                        serialzer = customType.Get<T>();
                 }
-                else if (propertyType == typeof(byte))
+
+                if (serialzer != null)
                 {
-                    var setDelegate = ExtractSetDelegate<T, byte>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, byte>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetByte());
-                    info.WriteDelegate[i] = writer => writer.Put(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(sbyte))
-                {
-                    var setDelegate = ExtractSetDelegate<T, sbyte>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, sbyte>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetSByte());
-                    info.WriteDelegate[i] = writer => writer.Put(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(short))
-                {
-                    var setDelegate = ExtractSetDelegate<T, short>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, short>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetShort());
-                    info.WriteDelegate[i] = writer => writer.Put(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(ushort))
-                {
-                    var setDelegate = ExtractSetDelegate<T, ushort>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, ushort>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetUShort());
-                    info.WriteDelegate[i] = writer => writer.Put(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(int))
-                {
-                    var setDelegate = ExtractSetDelegate<T, int>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, int>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetInt());
-                    info.WriteDelegate[i] = writer => writer.Put(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(uint))
-                {
-                    var setDelegate = ExtractSetDelegate<T, uint>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, uint>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetUInt());
-                    info.WriteDelegate[i] = writer => writer.Put(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(long))
-                {
-                    var setDelegate = ExtractSetDelegate<T, long>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, long>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetLong());
-                    info.WriteDelegate[i] = writer => writer.Put(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(ulong))
-                {
-                    var setDelegate = ExtractSetDelegate<T, ulong>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, ulong>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetULong());
-                    info.WriteDelegate[i] = writer => writer.Put(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(float))
-                {
-                    var setDelegate = ExtractSetDelegate<T, float>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, float>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetFloat());
-                    info.WriteDelegate[i] = writer => writer.Put(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(double))
-                {
-                    var setDelegate = ExtractSetDelegate<T, double>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, double>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetDouble());
-                    info.WriteDelegate[i] = writer => writer.Put(getDelegate((T)info.Reference));
-                }
-                // Array types
-                else if (propertyType == typeof(string[]))
-                {
-                    var setDelegate = ExtractSetDelegate<T, string[]>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, string[]>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetStringArray(MaxStringLenght));
-                    info.WriteDelegate[i] = writer => writer.PutArray(getDelegate((T)info.Reference), MaxStringLenght);
-                }
-                else if (propertyType == typeof(byte[]))
-                {
-                    var setDelegate = ExtractSetDelegate<T, byte[]>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, byte[]>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetBytesWithLength());
-                    info.WriteDelegate[i] = writer => writer.PutBytesWithLength(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(short[]))
-                {
-                    var setDelegate = ExtractSetDelegate<T, short[]>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, short[]>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetShortArray());
-                    info.WriteDelegate[i] = writer => writer.PutArray(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(ushort[]))
-                {
-                    var setDelegate = ExtractSetDelegate<T, ushort[]>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, ushort[]>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetUShortArray());
-                    info.WriteDelegate[i] = writer => writer.PutArray(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(int[]))
-                {
-                    var setDelegate = ExtractSetDelegate<T, int[]>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, int[]>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetIntArray());
-                    info.WriteDelegate[i] = writer => writer.PutArray(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(uint[]))
-                {
-                    var setDelegate = ExtractSetDelegate<T, uint[]>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, uint[]>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetUIntArray());
-                    info.WriteDelegate[i] = writer => writer.PutArray(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(long[]))
-                {
-                    var setDelegate = ExtractSetDelegate<T, long[]>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, long[]>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetLongArray());
-                    info.WriteDelegate[i] = writer => writer.PutArray(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(ulong[]))
-                {
-                    var setDelegate = ExtractSetDelegate<T, ulong[]>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, ulong[]>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetULongArray());
-                    info.WriteDelegate[i] = writer => writer.PutArray(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(float[]))
-                {
-                    var setDelegate = ExtractSetDelegate<T, float[]>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, float[]>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetFloatArray());
-                    info.WriteDelegate[i] = writer => writer.PutArray(getDelegate((T)info.Reference));
-                }
-                else if (propertyType == typeof(double[]))
-                {
-                    var setDelegate = ExtractSetDelegate<T, double[]>(setMethod);
-                    var getDelegate = ExtractGetDelegate<T, double[]>(getMethod);
-                    info.ReadDelegate[i] = reader => setDelegate((T)info.Reference, reader.GetDoubleArray());
-                    info.WriteDelegate[i] = writer => writer.PutArray(getDelegate((T)info.Reference));
+                    serialzer.Init(getMethod, setMethod, callType);
+                    serializers.Add(serialzer);
                 }
                 else
                 {
-                    CustomType registeredCustomType;
-                    bool array = false;
-
-                    if (propertyType.IsArray)
-                    {
-                        array = true;
-                        propertyType = propertyType.GetElementType();
-                    }
-
-                    if (_registeredCustomTypes.TryGetValue(propertyType, out registeredCustomType))
-                    {
-                        if (array) //Array type serialize/deserialize
-                        {
-                            info.ReadDelegate[i] = reader =>
-                            { 
-                                ushort arrLength = reader.GetUShort();
-                                Array arr = Array.CreateInstance(propertyType, arrLength);
-                                for (int k = 0; k < arrLength; k++)
-                                {
-                                    arr.SetValue(registeredCustomType.ReadDelegate(reader), k);
-                                }
-
-                                property.SetValue(info.Reference, arr, null);
-                            };
-
-                            info.WriteDelegate[i] = writer =>
-                            {
-                                Array arr = (Array)property.GetValue(info.Reference, null);
-                                writer.Put((ushort)arr.Length);
-                                for (int k = 0; k < arr.Length; k++)
-                                {
-                                    registeredCustomType.WriteDelegate(writer, arr.GetValue(k));
-                                }
-                            };
-                        }
-                        else //Simple
-                        {
-                            info.ReadDelegate[i] = reader =>
-                            {
-                                property.SetValue(info.Reference, registeredCustomType.ReadDelegate(reader), null);
-                            };
-
-                            info.WriteDelegate[i] = writer =>
-                            {
-                                registeredCustomType.WriteDelegate(writer, property.GetValue(info.Reference, null));
-                            };
-                        }
-                    }
-                    else
-                    {
-                        //Set empty for later update
-                        //info.ReadDelegate[i] = reader => { };
-                        //info.WriteDelegate[i] = writer => { };
-                        throw new Exception("Unknown property type: " + propertyType.Name);
-                    }
+                    throw new InvalidTypeException("Unknown property type: " + propertyType.FullName);
                 }
-
-                //increase index
-                i++;
             }
-            _cache.Add(nameHash, info);
-
-            return info;
+            ClassInfo<T>.Instance = new ClassInfo<T>(serializers);
+            return ClassInfo<T>.Instance;
         }
 
-        /// <summary>
-        /// Reads all available data from NetDataReader and calls OnReceive delegates
-        /// </summary>
-        /// <param name="reader">NetDataReader with packets data</param>
-        public void ReadAllPackets(NetDataReader reader)
+        /// <exception cref="InvalidTypeException"><typeparamref name="T"/>'s fields are not supported, or it has no fields</exception>
+        public void Register<T>()
         {
-            while (reader.AvailableBytes > 0)
-            {
-                ReadPacket(reader);
-            }
-        }
-
-        /// <summary>
-        /// Reads all available data from NetDataReader and calls OnReceive delegates
-        /// </summary>
-        /// <param name="reader">NetDataReader with packets data</param>
-        /// <param name="userData">Argument that passed to OnReceivedEvent</param>
-        public void ReadAllPackets<T>(NetDataReader reader, T userData)
-        {
-            while (reader.AvailableBytes > 0)
-            {
-                ReadPacket(reader, userData);
-            }
-        }
-
-        /// <summary>
-        /// Reads one packet from NetDataReader and calls OnReceive delegate
-        /// </summary>
-        /// <param name="reader">NetDataReader with packet</param>
-        public void ReadPacket(NetDataReader reader)
-        {
-            ReadPacket<object>(reader, null);
+            RegisterInternal<T>();
         }
 
         /// <summary>
@@ -491,22 +687,20 @@ namespace LiteNetLib.Utils
         /// </summary>
         /// <param name="reader">NetDataReader with packet</param>
         /// <returns>Returns packet if packet in reader is matched type</returns>
-        public T ReadKnownPacket<T>(NetDataReader reader) where T : class, new()
+        /// <exception cref="InvalidTypeException"><typeparamref name="T"/>'s fields are not supported, or it has no fields</exception>
+        public T Deserialize<T>(NetDataReader reader) where T : class, new()
         {
-            ulong name = _hasher.ReadHash(reader);
-            var info = _cache[name];
-            ulong typeHash = _hasher.GetHash(typeof(T).Name);
-            if (typeHash != name)
+            var info = RegisterInternal<T>();
+            var result = new T();
+            try
+            {
+                info.Read(result, reader);
+            }
+            catch
             {
                 return null;
             }
-            info.Reference = info.CreatorFunc != null ? info.CreatorFunc() : Activator.CreateInstance<T>();
-
-            for (int i = 0; i < info.ReadDelegate.Length; i++)
-            {
-                info.ReadDelegate[i](reader);
-            }
-            return (T)info.Reference;
+            return result;
         }
 
         /// <summary>
@@ -515,145 +709,41 @@ namespace LiteNetLib.Utils
         /// <param name="reader">NetDataReader with packet</param>
         /// <param name="target">Deserialization target</param>
         /// <returns>Returns true if packet in reader is matched type</returns>
-        public bool ReadKnownPacket<T>(NetDataReader reader, T target) where T : class, new()
+        /// <exception cref="InvalidTypeException"><typeparamref name="T"/>'s fields are not supported, or it has no fields</exception>
+        public bool Deserialize<T>(NetDataReader reader, T target) where T : class, new()
         {
-            ulong name = _hasher.ReadHash(reader);
-            var info = _cache[name];
-            ulong typeHash = _hasher.GetHash(typeof(T).Name);
-            if (typeHash != name)
+            var info = RegisterInternal<T>();
+            try
+            {
+                info.Read(target, reader);
+            }
+            catch
             {
                 return false;
-            }
-
-            info.Reference = target;
-
-            for (int i = 0; i < info.ReadDelegate.Length; i++)
-            {
-                info.ReadDelegate[i](reader);
             }
             return true;
         }
 
         /// <summary>
-        /// Reads one packet from NetDataReader and calls OnReceive delegate
-        /// </summary>
-        /// <param name="reader">NetDataReader with packet</param>
-        /// <param name="userData">Argument that passed to OnReceivedEvent</param>
-        public void ReadPacket<T>(NetDataReader reader, T userData)
-        {
-            ulong name = _hasher.ReadHash(reader);
-            var info = _cache[name];
-
-            if (info.CreatorFunc != null)
-            {
-                info.Reference = info.CreatorFunc();
-            }
-
-            for(int i = 0; i < info.ReadDelegate.Length; i++)
-            {
-                info.ReadDelegate[i](reader);
-            }
-
-            if(info.OnReceive != null)
-            {
-                info.OnReceive(info.Reference, userData);
-            }
-        }
-
-        /// <summary>
-        /// Register and subscribe to packet receive event
-        /// </summary>
-        /// <param name="onReceive">event that will be called when packet deserialized with ReadPacket method</param>
-        /// <param name="packetConstructor">Method that constructs packet intead of slow Activator.CreateInstance</param>
-        public void Subscribe<T>(Action<T> onReceive, Func<T> packetConstructor) where T : class, new()
-        {
-            var t = typeof(T);
-            var info = Register<T>(t, _hasher.GetHash(t.Name));
-            info.CreatorFunc = () => packetConstructor();
-            info.OnReceive = (o, userData) => { onReceive((T)o); };
-        }
-
-        /// <summary>
-        /// Register packet type for direct reading (ReadKnownPacket)
-        /// </summary>
-        /// <param name="packetConstructor">Method that constructs packet intead of slow Activator.CreateInstance</param>
-        public void Register<T>(Func<T> packetConstructor = null) where T : class, new()
-        {
-            var t = typeof(T);
-            var info = Register<T>(t, _hasher.GetHash(t.Name));
-            if (packetConstructor != null)
-            {
-                info.CreatorFunc = () => packetConstructor();      
-            }
-            info.OnReceive = (o, userData) => { };
-        }
-
-        /// <summary>
-        /// Register and subscribe to packet receive event (with userData)
-        /// </summary>
-        /// <param name="onReceive">event that will be called when packet deserialized with ReadPacket method</param>
-        /// <param name="packetConstructor">Method that constructs packet intead of slow Activator.CreateInstance</param>
-        public void Subscribe<T, TUserData>(Action<T, TUserData> onReceive, Func<T> packetConstructor) where T : class, new()
-        {
-            var t = typeof(T);
-            var info = Register<T>(t, _hasher.GetHash(t.Name));
-            info.CreatorFunc = () => packetConstructor();
-            info.OnReceive = (o, userData) => { onReceive((T)o, (TUserData)userData); };
-        }
-
-        /// <summary>
-        /// Register and subscribe to packet receive event
-        /// This metod will overwrite last received packet class on receive (less garbage)
-        /// </summary>
-        /// <param name="onReceive">event that will be called when packet deserialized with ReadPacket method</param>
-        public void SubscribeReusable<T>(Action<T> onReceive) where T : class, new()
-        {
-            var t = typeof(T);
-            var info = Register<T>(t, _hasher.GetHash(t.Name));
-            info.Reference = new T();
-            info.OnReceive = (o, userData) => { onReceive((T)o); };
-        }
-
-        /// <summary>
-        /// Register and subscribe to packet receive event
-        /// This metod will overwrite last received packet class on receive (less garbage)
-        /// </summary>
-        /// <param name="onReceive">event that will be called when packet deserialized with ReadPacket method</param>
-        public void SubscribeReusable<T, TUserData>(Action<T, TUserData> onReceive) where T : class, new()
-        {
-            var t = typeof(T);
-            var info = Register<T>(t, _hasher.GetHash(t.Name));
-            info.Reference = new T();
-            info.OnReceive = (o, userData) => { onReceive((T)o, (TUserData)userData); };
-        }
-
-        /// <summary>
-        /// Serialize struct to NetDataWriter (fast)
+        /// Serialize object to NetDataWriter (fast)
         /// </summary>
         /// <param name="writer">Serialization target NetDataWriter</param>
-        /// <param name="obj">Struct to serialize</param>
+        /// <param name="obj">Object to serialize</param>
+        /// <exception cref="InvalidTypeException"><typeparamref name="T"/>'s fields are not supported, or it has no fields</exception>
         public void Serialize<T>(NetDataWriter writer, T obj) where T : class, new()
         {
-            Type t = typeof(T);
-            ulong nameHash = _hasher.GetHash(t.Name);
-            var classInfo = Register<T>(t, nameHash);
-            var wd = classInfo.WriteDelegate;
-            var wdlen = wd.Length;
-            classInfo.Reference = obj;
-            _hasher.WriteHash(t.Name, writer);
-            for (int i = 0; i < wdlen; i++)
-            {
-                wd[i](writer);
-            }
+            RegisterInternal<T>().Write(obj, writer);
         }
 
         /// <summary>
-        /// Serialize struct to byte array
+        /// Serialize object to byte array
         /// </summary>
-        /// <param name="obj">Struct to serialize</param>
+        /// <param name="obj">Object to serialize</param>
         /// <returns>byte array with serialized data</returns>
         public byte[] Serialize<T>(T obj) where T : class, new()
         {
+            if (_writer == null)
+                _writer = new NetDataWriter();
             _writer.Reset();
             Serialize(_writer, obj);
             return _writer.CopyData();

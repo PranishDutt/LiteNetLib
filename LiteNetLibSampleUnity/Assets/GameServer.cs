@@ -1,8 +1,11 @@
+using System;
+using System.Net;
+using System.Net.Sockets;
 using UnityEngine;
 using LiteNetLib;
 using LiteNetLib.Utils;
 
-public class GameServer : MonoBehaviour, INetEventListener
+public class GameServer : MonoBehaviour, INetEventListener, INetLogger
 {
     private NetManager _netServer;
     private NetPeer _ourPeer;
@@ -12,10 +15,11 @@ public class GameServer : MonoBehaviour, INetEventListener
 
     void Start()
     {
+        NetDebug.Logger = this;
         _dataWriter = new NetDataWriter();
-        _netServer = new NetManager(this, 100, "sample_app");
+        _netServer = new NetManager(this);
         _netServer.Start(5000);
-        _netServer.DiscoveryEnabled = true;
+        _netServer.BroadcastReceiveEnabled = true;
         _netServer.UpdateTime = 15;
     }
 
@@ -31,13 +35,14 @@ public class GameServer : MonoBehaviour, INetEventListener
             _serverBall.transform.Translate(1f * Time.fixedDeltaTime, 0f, 0f);
             _dataWriter.Reset();
             _dataWriter.Put(_serverBall.transform.position.x);
-            _ourPeer.Send(_dataWriter, SendOptions.Sequenced);
+            _ourPeer.Send(_dataWriter, DeliveryMethod.Sequenced);
         }
     }
 
     void OnDestroy()
     {
-        if(_netServer != null)
+        NetDebug.Logger = null;
+        if (_netServer != null)
             _netServer.Stop();
     }
 
@@ -47,28 +52,30 @@ public class GameServer : MonoBehaviour, INetEventListener
         _ourPeer = peer;
     }
 
-    public void OnPeerDisconnected(NetPeer peer, DisconnectReason reason, int socketErrorCode)
-    {
- 
-    }
-
-    public void OnNetworkError(NetEndPoint endPoint, int socketErrorCode)
+    public void OnNetworkError(IPEndPoint endPoint, SocketError socketErrorCode)
     {
         Debug.Log("[SERVER] error " + socketErrorCode);
     }
 
-    public void OnNetworkReceiveUnconnected(NetEndPoint remoteEndPoint, NetDataReader reader, UnconnectedMessageType messageType)
+    public void OnNetworkReceiveUnconnected(IPEndPoint remoteEndPoint, NetPacketReader reader,
+        UnconnectedMessageType messageType)
     {
-        if (messageType == UnconnectedMessageType.DiscoveryRequest)
+        if (messageType == UnconnectedMessageType.Broadcast)
         {
             Debug.Log("[SERVER] Received discovery request. Send discovery response");
-            _netServer.SendDiscoveryResponse(new byte[] {1}, remoteEndPoint);
+            NetDataWriter resp = new NetDataWriter();
+            resp.Put(1);
+            _netServer.SendUnconnectedMessage(resp, remoteEndPoint);
         }
     }
 
     public void OnNetworkLatencyUpdate(NetPeer peer, int latency)
     {
-        
+    }
+
+    public void OnConnectionRequest(ConnectionRequest request)
+    {
+        request.AcceptIfKey("sample_app");
     }
 
     public void OnPeerDisconnected(NetPeer peer, DisconnectInfo disconnectInfo)
@@ -78,8 +85,12 @@ public class GameServer : MonoBehaviour, INetEventListener
             _ourPeer = null;
     }
 
-    public void OnNetworkReceive(NetPeer peer, NetDataReader reader)
+    public void OnNetworkReceive(NetPeer peer, NetPacketReader reader, DeliveryMethod deliveryMethod)
     {
-        
+    }
+
+    public void WriteNet(NetLogLevel level, string str, params object[] args)
+    {
+        Debug.LogFormat(str, args);
     }
 }

@@ -1,11 +1,13 @@
 ﻿using System;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 using LiteNetLib;
 using LiteNetLib.Utils;
 
 namespace LibSample
 {
-    class BroadcastTest
+    class BroadcastTest : IExample
     {
         private class ClientListener : INetEventListener
         {
@@ -13,7 +15,7 @@ namespace LibSample
 
             public void OnPeerConnected(NetPeer peer)
             {
-                Console.WriteLine("[Client {0}] connected to: {1}:{2}", Client.LocalEndPoint.Port, peer.EndPoint.Host, peer.EndPoint.Port);
+                Console.WriteLine("[Client {0}] connected to: {1}:{2}", Client.LocalPort, peer.EndPoint.Address, peer.EndPoint.Port);
             }
 
             public void OnPeerDisconnected(NetPeer peer, DisconnectInfo disconnectInfo)
@@ -21,28 +23,34 @@ namespace LibSample
                 Console.WriteLine("[Client] disconnected: " + disconnectInfo.Reason);
             }
 
-            public void OnNetworkError(NetEndPoint endPoint, int error)
+            public void OnNetworkError(IPEndPoint endPoint, SocketError error)
             {
                 Console.WriteLine("[Client] error! " + error);
             }
 
-            public void OnNetworkReceive(NetPeer peer, NetDataReader reader)
+            public void OnNetworkReceive(NetPeer peer, NetPacketReader reader, DeliveryMethod deliveryMethod)
             {
 
             }
 
-            public void OnNetworkReceiveUnconnected(NetEndPoint remoteEndPoint, NetDataReader reader, UnconnectedMessageType messageType)
+            public void OnNetworkReceiveUnconnected(IPEndPoint remoteEndPoint, NetPacketReader reader, UnconnectedMessageType messageType)
             {
-                Console.WriteLine("[Client] ReceiveUnconnected {0}. From: {1}. Data: {2}", messageType, remoteEndPoint, reader.GetString(100));
-                if (messageType == UnconnectedMessageType.DiscoveryResponse)
+                var text = reader.GetString(100);
+                Console.WriteLine("[Client] ReceiveUnconnected {0}. From: {1}. Data: {2}", messageType, remoteEndPoint, text);
+                if (messageType == UnconnectedMessageType.BasicMessage && text == "SERVER DISCOVERY RESPONSE")
                 {
-                    Client.Connect(remoteEndPoint);
+                    Client.Connect(remoteEndPoint, "key");
                 }
             }
 
             public void OnNetworkLatencyUpdate(NetPeer peer, int latency)
             {
 
+            }
+
+            public void OnConnectionRequest(ConnectionRequest request)
+            {
+                request.Reject();
             }
         }
 
@@ -53,10 +61,10 @@ namespace LibSample
             public void OnPeerConnected(NetPeer peer)
             {
                 Console.WriteLine("[Server] Peer connected: " + peer.EndPoint);
-                var peers = Server.GetPeers();
+                var peers = Server.ConnectedPeerList;
                 foreach (var netPeer in peers)
                 {
-                    Console.WriteLine("ConnectedPeersList: id={0}, ep={1}", netPeer.ConnectId, netPeer.EndPoint);
+                    Console.WriteLine("ConnectedPeersList: id={0}, ep={1}", netPeer.Id, netPeer.EndPoint);
                 }
             }
 
@@ -65,27 +73,32 @@ namespace LibSample
                 Console.WriteLine("[Server] Peer disconnected: " + peer.EndPoint + ", reason: " + disconnectInfo.Reason);
             }
 
-            public void OnNetworkError(NetEndPoint endPoint, int socketErrorCode)
+            public void OnNetworkError(IPEndPoint endPoint, SocketError socketErrorCode)
             {
                 Console.WriteLine("[Server] error: " + socketErrorCode);
             }
 
-            public void OnNetworkReceive(NetPeer peer, NetDataReader reader)
+            public void OnNetworkReceive(NetPeer peer, NetPacketReader reader, DeliveryMethod deliveryMethod)
             {
 
             }
 
-            public void OnNetworkReceiveUnconnected(NetEndPoint remoteEndPoint, NetDataReader reader, UnconnectedMessageType messageType)
+            public void OnNetworkReceiveUnconnected(IPEndPoint remoteEndPoint, NetPacketReader reader, UnconnectedMessageType messageType)
             {
                 Console.WriteLine("[Server] ReceiveUnconnected {0}. From: {1}. Data: {2}", messageType, remoteEndPoint, reader.GetString(100));
                 NetDataWriter wrtier = new NetDataWriter();
-                wrtier.Put("SERVER DISCOVERY RESPONSE :)");
-                Server.SendDiscoveryResponse(wrtier, remoteEndPoint);
+                wrtier.Put("SERVER DISCOVERY RESPONSE");
+                Server.SendUnconnectedMessage(wrtier, remoteEndPoint);
             }
 
             public void OnNetworkLatencyUpdate(NetPeer peer, int latency)
             {
 
+            }
+
+            public void OnConnectionRequest(ConnectionRequest request)
+            {
+                request.AcceptIfKey("key");
             }
         }
 
@@ -95,11 +108,15 @@ namespace LibSample
 
         public void Run()
         {
+            Console.WriteLine("=== Broadcast Test ===");
             //Server
             _serverListener = new ServerListener();
 
-            NetManager server = new NetManager(_serverListener, 2, "myapp1");
-            server.DiscoveryEnabled = true;
+            NetManager server = new NetManager(_serverListener)
+            {
+                BroadcastReceiveEnabled = true, 
+                IPv6Enabled = IPv6Mode.DualMode
+            };
             if (!server.Start(9050))
             {
                 Console.WriteLine("Server start failed");
@@ -111,10 +128,14 @@ namespace LibSample
             //Client
             _clientListener1 = new ClientListener();
 
-            NetManager client1 = new NetManager(_clientListener1, "myapp1");
+            NetManager client1 = new NetManager(_clientListener1)
+            {
+                UnconnectedMessagesEnabled = true, 
+                SimulateLatency = true, 
+                SimulationMaxLatency = 1500,
+                IPv6Enabled = IPv6Mode.DualMode
+            };
             _clientListener1.Client = client1;
-            client1.SimulateLatency = true;
-            client1.SimulationMaxLatency = 1500;
             if (!client1.Start())
             {
                 Console.WriteLine("Client1 start failed");
@@ -123,21 +144,26 @@ namespace LibSample
             }
 
             _clientListener2 = new ClientListener();
-            NetManager client2 = new NetManager(_clientListener2, "myapp1");
+            NetManager client2 = new NetManager(_clientListener2)
+            {
+                UnconnectedMessagesEnabled = true,
+                SimulateLatency = true, 
+                SimulationMaxLatency = 1500,
+                IPv6Enabled = IPv6Mode.DualMode
+            };
+
             _clientListener2.Client = client2;
-            client2.SimulateLatency = true;
-            client2.SimulationMaxLatency = 1500;
             client2.Start();
 
             //Send broadcast
             NetDataWriter writer = new NetDataWriter();
 
             writer.Put("CLIENT 1 DISCOVERY REQUEST");
-            client1.SendDiscoveryRequest(writer, 9050);
+            client1.SendBroadcast(writer, 9050);
             writer.Reset();
 
             writer.Put("CLIENT 2 DISCOVERY REQUEST");
-            client2.SendDiscoveryRequest(writer, 9050);
+            client2.SendBroadcast(writer, 9050);
 
             while (!Console.KeyAvailable)
             {
